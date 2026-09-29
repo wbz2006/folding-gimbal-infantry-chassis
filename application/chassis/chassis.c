@@ -19,6 +19,7 @@
 #include "referee_task.h"
 
 #include "general_def.h"
+#include "user_lib.h"
 #include "bsp_dwt.h"
 #include "referee_UI.h"
 #include "arm_math.h"
@@ -143,6 +144,7 @@ void ChassisInit()
  * @brief 计算每个轮毂电机的输出,正运动学解算
  *        用宏进行预替换减小开销,运动解算具体过程参考教程
  */
+#ifdef CHASSIS_DRIVE_MECANUM
 static void MecanumCalculate()
 {
     vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
@@ -150,6 +152,19 @@ static void MecanumCalculate()
     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
     vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
 }
+#endif
+
+#ifdef CHASSIS_DRIVE_OMNI_X
+#define COS45 0.70710678f
+#define OMNI_L (LF_CENTER)
+static void OmniCalculate()
+{
+    vt_rf =  chassis_vx * COS45 + chassis_vy * COS45 + chassis_cmd_recv.wz * OMNI_L;
+    vt_lf = -chassis_vx * COS45 + chassis_vy * COS45 + chassis_cmd_recv.wz * OMNI_L;
+    vt_lb = -chassis_vx * COS45 - chassis_vy * COS45 + chassis_cmd_recv.wz * OMNI_L;
+    vt_rb =  chassis_vx * COS45 - chassis_vy * COS45 + chassis_cmd_recv.wz * OMNI_L;
+}
+#endif
 
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -219,6 +234,11 @@ void ChassisTask()
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
         chassis_cmd_recv.wz = 4000;
         break;
+    case CHASSIS_FOLDED_ROTATE:
+        /* wz is supplied directly by the yaw stick on the gimbal board. */
+        chassis_cmd_recv.wz = float_constrain(chassis_cmd_recv.wz,
+                                               -4500.0f, 4500.0f);
+        break;
     default:
         break;
     }
@@ -232,7 +252,11 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     // 根据控制模式进行正运动学解算,计算底盘输出
+#ifdef CHASSIS_DRIVE_MECANUM
     MecanumCalculate();
+#else
+    OmniCalculate();
+#endif
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

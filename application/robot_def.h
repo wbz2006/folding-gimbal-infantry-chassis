@@ -17,12 +17,15 @@
 #include "stdint.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
-#define ONE_BOARD // 单板控制整车
-// #define CHASSIS_BOARD //底盘板
+#define CHASSIS_BOARD //底盘板
+// #define ONE_BOARD // 单板控制整车
 // #define GIMBAL_BOARD  //云台板
 
 //#define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 #define VISION_USE_UART // 使用串口发送视觉数据
+
+// 底盘运动学类型
+#define CHASSIS_DRIVE_OMNI_X // X 型四全向轮
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
@@ -86,15 +89,42 @@ typedef enum
     CHASSIS_ROTATE,            // 小陀螺模式
     CHASSIS_NO_FOLLOW,         // 不跟随，允许全向平移
     CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式，底盘叠加角度环控制
+    CHASSIS_FOLDED_ROTATE,     // 云台折叠时，wz 由云台yaw拨杆直接给出
 } chassis_mode_e;
 
 // 云台模式设置
 typedef enum
 {
     GIMBAL_ZERO_FORCE = 0, // 电流零输入
-    GIMBAL_FREE_MODE,      // 云台自由运动模式,即与底盘分离(底盘此时应为NO_FOLLOW)反馈值为电机total_angle;似乎可以改为全部用IMU数据?
+    GIMBAL_FREE_MODE,      // 云台与底盘分离
     GIMBAL_GYRO_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
 } gimbal_mode_e;
+
+// 云台折叠状态机
+typedef enum
+{
+    GIMBAL_FOLDED = 0,
+    GIMBAL_FOLDING,
+    GIMBAL_UNFOLDING,
+    GIMBAL_DEPLOYED,
+} gimbal_fold_state_e;
+
+// 云台折叠请求，由 robot_cmd 根据遥控器模式产生
+typedef enum
+{
+    GIMBAL_REQUEST_FOLD = 0,
+    GIMBAL_REQUEST_GYRO,
+    GIMBAL_REQUEST_FREE,
+    GIMBAL_REQUEST_FOLLOW,
+} gimbal_request_mode_e;
+
+typedef enum
+{
+    FOLD_STEP_LEVEL_UPPER_PITCH,
+    FOLD_STEP_CENTER_YAW,
+    FOLD_STEP_MOVE_LOWER_PITCH,
+    FOLD_STEP_FINISH,
+} fold_step_e;
 
 // 发射模式设置
 typedef enum
@@ -157,6 +187,7 @@ typedef struct
     float chassis_rotate_wz;
 
     gimbal_mode_e gimbal_mode;
+    gimbal_request_mode_e request_mode;
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -198,6 +229,7 @@ typedef struct
 {
     attitude_t gimbal_imu_data;
     uint16_t yaw_motor_single_round_angle;
+    gimbal_fold_state_e fold_state;
 } Gimbal_Upload_Data_s;
 
 typedef struct
