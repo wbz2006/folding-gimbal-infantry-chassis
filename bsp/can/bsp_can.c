@@ -10,6 +10,13 @@
 // @todo: 后续为每个CAN总线单独添加一个can_instance指针数组,提高回调查找的性能
 static CANInstance *can_instance[CAN_MX_REGISTER_CNT] = {NULL};
 static uint8_t idx; // 全局CAN实例索引,每次有新的模块注册会自增
+volatile uint32_t can_error_count;
+volatile uint32_t can_bus_off_count;
+#ifdef FDCAN
+static volatile FDCAN_HandleTypeDef *fdcan_recovery_handle;
+static volatile uint8_t fdcan_recovery_pending;
+static uint32_t fdcan_rx_active_its;
+#endif
 
 /* ----------------two static function called by CANRegister()-------------------- */
 
@@ -110,7 +117,10 @@ void CANServiceInit()
 	uint32_t FDCAN_RXActiveITs = FDCAN_IT_RX_FIFO0_NEW_MESSAGE|FDCAN_IT_RX_FIFO0_FULL\
 			|FDCAN_IT_RX_FIFO0_WATERMARK|FDCAN_IT_RX_FIFO0_MESSAGE_LOST \
 			|FDCAN_IT_RX_FIFO1_NEW_MESSAGE| FDCAN_IT_RX_FIFO1_FULL\
-			|FDCAN_IT_RX_FIFO1_WATERMARK|FDCAN_IT_RX_FIFO1_MESSAGE_LOST;
+			|FDCAN_IT_RX_FIFO1_WATERMARK|FDCAN_IT_RX_FIFO1_MESSAGE_LOST \
+			|FDCAN_IT_ERROR_WARNING|FDCAN_IT_ERROR_PASSIVE|FDCAN_IT_BUS_OFF \
+			|FDCAN_IT_ARB_PROTOCOL_ERROR|FDCAN_IT_DATA_PROTOCOL_ERROR;
+	fdcan_rx_active_its = FDCAN_RXActiveITs;
 
 
 	//HAL_FDCAN_ConfigClockCalibration()
@@ -149,6 +159,8 @@ void CANServiceInit()
 
 CANInstance *CANRegister(CAN_Init_Config_s *config)
 {
+    if (config == NULL || config->can_handle == NULL)
+        return NULL;
     if (!idx)
     {
         CANServiceInit(); // 第一次注册,先进行硬件初始化
@@ -175,6 +187,8 @@ CANInstance *CANRegister(CAN_Init_Config_s *config)
     }
 
     CANInstance *instance = (CANInstance *)malloc(sizeof(CANInstance)); // 分配空间
+    if (instance == NULL)
+        return NULL;
     memset(instance, 0, sizeof(CANInstance));                           // 分配的空间未必是0,所以要先清空
     // 进行发送报文的配置
 #ifdef FDCAN
@@ -212,6 +226,24 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
 {
     static uint32_t busy_count;
     static volatile float wait_time __attribute__((unused)); // for cancel warning
+    if (_instance == NULL || _instance->can_handle == NULL)
+        return 0;
+
+#ifdef FDCAN
+    if (fdcan_recovery_pending &&
+        fdcan_recovery_handle == _instance->can_handle)
+    {
+        if (HAL_FDCAN_GetState(_instance->can_handle) == HAL_FDCAN_STATE_BUSY &&
+            HAL_FDCAN_Stop(_instance->can_handle) == HAL_OK)
+        {
+            if (HAL_FDCAN_Start(_instance->can_handle) == HAL_OK)
+                HAL_FDCAN_ActivateNotification(_instance->can_handle, fdcan_rx_active_its, 0);
+        }
+        fdcan_recovery_pending = 0;
+        return 0;
+    }
+#endif
+
     float dwt_start = DWT_GetTimeline_ms();
 #ifdef FDCAN
     while(HAL_FDCAN_GetTxFifoFreeLevel(_instance->can_handle)==0)
@@ -223,6 +255,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
         {
             LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
             busy_count++;
+            _instance->tx_error_count++;
             return 0;
         }
     }
@@ -237,6 +270,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     {
         LOGWARNING("[bsp_can] CAN bus BUSY! cnt:%d", busy_count);
         busy_count++;
+        _instance->tx_error_count++;
         return 0;
     }
     return 1; // 发送成功
@@ -244,12 +278,11 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
 
 void CANSetDLC(CANInstance *_instance, uint8_t length)
 {
+    if (_instance == NULL)
+        return;
     // 发送长度错误!检查调用参数是否出错,或出现野指针/越界访问
     if (length > 8 || length == 0) // 安全检查
-        while (1)
-        {
-        	LOGERROR("[bsp_can] CAN DLC error! check your code or wild pointer");
-        }
+        return;
 
     _instance->txconf.DataLength = DLC_LookUp_Table[length];
 }
@@ -291,7 +324,10 @@ static void FDCANFIFOxCallback(FDCAN_HandleTypeDef *_hfdcan, uint32_t fifox)
 				{
 					if (can_instance[i]->can_module_callback != NULL) // 回调函数不为空就调用
 					{
-						can_instance[i]->rx_len = DataLength;               // 保存接收到的数据长度
+                        if (DataLength > 8)
+                            continue;
+                        can_instance[i]->rx_len = DataLength;               // 保存接收到的数据长度
+                        can_instance[i]->rx_count++;
 						memcpy(can_instance[i]->rx_buff, fdcan_rx_buff, can_instance[i]->rx_len); // 消息拷贝到对应实例
 						can_instance[i]->can_module_callback(can_instance[i]);     // 触发回调进行数据解析和处理
 					}
@@ -328,6 +364,18 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 	{
 		FDCANFIFOxCallback(hfdcan, FDCAN_RX_FIFO1); // 调用我们自己写的函数来处理消息
 	}
+}
+
+void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan,
+                                    uint32_t ErrorStatusITs)
+{
+    can_error_count++;
+    if ((ErrorStatusITs & FDCAN_IT_BUS_OFF) != 0U)
+    {
+        can_bus_off_count++;
+        fdcan_recovery_handle = hfdcan;
+        fdcan_recovery_pending = 1;
+    }
 }
 
 
