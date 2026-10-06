@@ -17,15 +17,16 @@
 #include "stdint.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
-#define CHASSIS_BOARD //底盘板
 // #define ONE_BOARD // 单板控制整车
+#define CHASSIS_BOARD //底盘板
 // #define GIMBAL_BOARD  //云台板
 
 //#define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 #define VISION_USE_UART // 使用串口发送视觉数据
 
 // 底盘运动学类型
-#define CHASSIS_DRIVE_OMNI_X // X 型四全向轮
+//#define CHASSIS_DRIVE_MECANUM     // 麦克纳姆轮
+#define CHASSIS_DRIVE_OMNI_X        // X 型四全向轮
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
@@ -89,35 +90,33 @@ typedef enum
     CHASSIS_ROTATE,            // 小陀螺模式
     CHASSIS_NO_FOLLOW,         // 不跟随，允许全向平移
     CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式，底盘叠加角度环控制
-    CHASSIS_FOLDED_ROTATE,     // 云台折叠时，wz 由云台yaw拨杆直接给出
+    CHASSIS_FOLDED_ROTATE,     // 云台折叠状态下的跟随模式
 } chassis_mode_e;
 
 // 云台模式设置
 typedef enum
 {
     GIMBAL_ZERO_FORCE = 0, // 电流零输入
-    GIMBAL_FREE_MODE,      // 云台与底盘分离
-    GIMBAL_GYRO_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
+    GIMBAL_IMU_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
 } gimbal_mode_e;
 
 // 云台折叠状态机
 typedef enum
 {
-    GIMBAL_FOLDED = 0,
-    GIMBAL_FOLDING,
-    GIMBAL_UNFOLDING,
-    GIMBAL_DEPLOYED,
+    GIMBAL_FOLDED = 0,      // 折叠状态
+    GIMBAL_FOLDING,         // 折叠过程状态
+    GIMBAL_UNFOLDING,       // 展开过程状态
+    GIMBAL_DEPLOYED,        // 部署状态
 } gimbal_fold_state_e;
 
-// 云台折叠请求，由 robot_cmd 根据遥控器模式产生
+// 云台折叠请求状态机
 typedef enum
 {
-    GIMBAL_REQUEST_FOLD = 0,
-    GIMBAL_REQUEST_GYRO,
-    GIMBAL_REQUEST_FREE,
-    GIMBAL_REQUEST_FOLLOW,
+    GIMBAL_REQUEST_FOLD = 0, // 请求折叠
+    GIMBAL_REQUEST_DEPLOY,   // 请求展开
 } gimbal_request_mode_e;
 
+// 云台折叠步骤状态机
 typedef enum
 {
     FOLD_STEP_LEVEL_UPPER_PITCH,
@@ -125,6 +124,14 @@ typedef enum
     FOLD_STEP_MOVE_LOWER_PITCH,
     FOLD_STEP_FINISH,
 } fold_step_e;
+
+typedef enum
+{
+    LOWER_PITCH_FOLD,
+    LOWER_PITCH_DEPLOY,
+    YAW_FOLD,
+    UPPER_PITCH_FOLD,
+} gimbal_reach_target_type_e;
 
 // 发射模式设置
 typedef enum
@@ -229,11 +236,13 @@ typedef struct
 {
     attitude_t gimbal_imu_data;
     uint16_t yaw_motor_single_round_angle;
+
     gimbal_fold_state_e fold_state;
 } Gimbal_Upload_Data_s;
 
 typedef struct
 {
+    uint8_t reserved;
     // code to go here
     // ...
 } Shoot_Upload_Data_s;
