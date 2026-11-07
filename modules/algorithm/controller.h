@@ -123,6 +123,9 @@ typedef struct // config parameter
  */
 void PIDInit(PIDInstance *pid, PID_Init_Config_s *config);
 
+/** 清除计算历史，保留控制参数。 */
+void PIDResetState(PIDInstance *pid);
+
 /**
  * @brief 计算PID输出
  *

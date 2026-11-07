@@ -10,6 +10,7 @@
  */
 #include "controller.h"
 #include "memory.h"
+#include <stddef.h>
 
 /* ----------------------------下面是pid优化环节的实现---------------------------- */
 
@@ -134,6 +135,12 @@ void PIDInit(PIDInstance *pid, PID_Init_Config_s *config)
     // utilize the quality of struct that its memeory is continuous
     memcpy(pid, config, sizeof(PID_Init_Config_s));
     // set rest of memory to 0
+    DWT_GetDeltaT(&pid->DWT_CNT);
+}
+
+void PIDResetState(PIDInstance *pid)
+{
+    memset(&pid->Measure, 0, sizeof(*pid) - offsetof(PIDInstance, Measure));
     DWT_GetDeltaT(&pid->DWT_CNT);
 }
 
