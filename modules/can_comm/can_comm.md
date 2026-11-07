@@ -2,13 +2,23 @@
 
 <p align='right'>neozng1@hnu.edu.cn</p>
 
-> TODO:
->
-> 1. 对`CANCommGet()`进行修改，使得其可以返回数据是否更新的相关信息。
+## 当前 H723 双板通信实现
+
+已采用 `dual-board_communication_demo_A` 的分包协议及可靠通信机制，底层使用 FDCAN 专用恢复流程，不能覆盖为 BxCAN 驱动。
+
+- 新应用使用 `CANCommReceive(instance, &data)`：在线检查、整包复制、清更新标志在同一短临界区执行。返回 1 表示最近完整有效包仍在线，不一定是本周期的新包；离线返回 0，调用者负责停机或清除旧状态。
+- `CANCommIsOnline()`同时要求收过完整 CRC 正确包、控制器可用、Bus-Off 代次一致、通信 daemon 未超时。控制器恢复后仍需新完整包才能再次在线。
+- 组包分片间隔达到 20 ms 或跨越 Bus-Off 时丢弃半包。
+- 整个逻辑包共享 1 ms 发送等待预算；任何分片发送失败就停止该逻辑包。离线时每 100 ms 才尝试发送一次。
+- `DaemonTask()`每 10 ms 调用 `CANServiceTask()`，FDCAN 轮询与错误中断配合维护 RUNNING / WAIT_RETRY / RECOVERING 状态，100 ms 重试、1000 ms 恢复超时。
+- `can_bus_status[0].online`表示 CAN1 对端有效包在线；`state/tec/rec`和恢复计数描述物理总线状态，两者含义不同。
+- `CANCommGet()`仅为旧接口，返回内部缓存指针，不能保证异步读取的一致性。下文旧范例涉及该接口时，应改为复制接口。
+
+底盘发 `0x311`、收 `0x312`，命令 24 字节、速度反馈扩展后 22 字节。后续云台接入时需同步 `robot_def.h` 的线上结构。只有线上 payload 使用 pack(1)，通信内部实例使用自然对齐。
 
 ## 重要提醒
 
-如果传输过程中出现多次丢包或长度校验不通过，尤其是传输长度较大的时候，请开启CAN的Auto Retransmission，并尝试修改CANComm实例的发送和接受ID（以提高在总线仲裁中的优先级）。
+本工程保持 CubeMX 的 AutoRetransmission=DISABLE。出现丢包时先检查两侧结构长度、CAN 位时序、总线负载及接线，并观察收发错误计数；恢复逻辑见上述 FDCAN 实现。
 
 ## 总览和封装说明
 
@@ -23,6 +33,7 @@ CAN comm是用于CAN多机通信的模块。你不需要关心实现的协议，
 ```c
 CANCommInstance *CANCommInit(CANComm_Init_Config_s* comm_config);
 void CANCommSend(CANCommInstance *instance, uint8_t *data);
+uint8_t CANCommReceive(CANCommInstance *instance, void *data);
 void *CANCommGet(CANCommInstance *instance);
 uint8_t CANCommIsOnline(CANCommInstance *instance);
 ```
