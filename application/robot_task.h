@@ -80,12 +80,13 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
     LOGINFO("[freeRTOS] MOTOR Task Start");
     for (;;)
     {
+        // 500Hz，与底盘电机反馈频率一致。
         motor_start = DWT_GetTimeline_ms();
         MotorControlTask();
         motor_dt = DWT_GetTimeline_ms() - motor_start;
         if (motor_dt > 1)
             LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);
-        osDelay(1);
+        osDelay(2);
     }
 }
 

@@ -26,7 +26,8 @@
 
 // 底盘运动学类型
 //#define CHASSIS_DRIVE_MECANUM     // 麦克纳姆轮
-#define CHASSIS_DRIVE_OMNI_X        // X 型四全向轮
+//#define CHASSIS_DRIVE_OMNI_X        // X 型四全向轮
+#define CHASSIS_DRIVE_SWERVE         // 全舵
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
@@ -37,7 +38,7 @@
 #define PITCH_MIN_ANGLE 0           // 部署机械限幅；与折叠强制零位分离
 #define GIMBAL_FOLD_UPPER_PITCH_TARGET_DEG 0.0f // 上下云台控制共用的 IMU Pitch 水平目标
 #define APP_COMMAND_TIMEOUT_MS 50U   // 应用控制命令新鲜度上限，daemon 周期换算见 daemon.h
-#define APP_FEEDBACK_TIMEOUT_MS 50U  // 应用反馈新鲜度上限，待调度实测确认
+#define APP_FEEDBACK_TIMEOUT_MS 50U  // 预留，当前底盘电机反馈离线由 DJI daemon 的 20 ms 窗口判定，此宏未接入
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 36    // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
 #define REDUCTION_RATIO_LOADER 49.0f // 拨盘电机的减速比,英雄需要修改为3508的19.0f
@@ -48,7 +49,14 @@
 #define CENTER_GIMBAL_OFFSET_X 0    // 云台旋转中心距底盘几何中心的距离,前后方向,云台位于正中心时默认设为0
 #define CENTER_GIMBAL_OFFSET_Y 0    // 云台旋转中心距底盘几何中心的距离,左右方向,云台位于正中心时默认设为0
 #define RADIUS_WHEEL 60             // 轮子半径
-#define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
+#define REDUCTION_RATIO_WHEEL (268.0f / 17.0f) // 驱动减速比；电机反馈为转子速度，需换算为轮面速度
+
+// 顺序：左前、右前、左后、右后。GM6020 直连舵轴，零位为轮子朝车头时的编码器值。
+#define SWERVE_STEER_ZERO_ECD_LF 0U // 占位，待实车标定
+#define SWERVE_STEER_ZERO_ECD_RF 0U
+#define SWERVE_STEER_ZERO_ECD_LB 0U
+#define SWERVE_STEER_ZERO_ECD_RB 0U
+#define CHASSIS_MAX_WHEEL_SPEED 2391.4f // 轮面线速度上限，mm/s；由 6000 rpm、268/17 减速比及当前轮半径换算
 
 #define GYRO2GIMBAL_DIR_YAW 1   // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH 1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
@@ -176,9 +184,9 @@ typedef struct
 typedef struct
 {
     // 控制部分
-    float vx;           // 前进方向速度
-    float vy;           // 横移方向速度
-    float wz;           // 旋转速度
+    float vx;           // 云台系前进速度，mm/s
+    float vy;           // 云台系向右速度，mm/s
+    float wz;           // 逆时针角速度，degree/s；由底盘模式生成
     float offset_angle; // 底盘和归中位置的夹角
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
@@ -221,15 +229,13 @@ typedef struct
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
     // attitude_t chassis_imu_data;
 #endif
-    // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
-
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
     uint8_t fault_flags;         // 底盘应用故障；双板时随反馈一起回传 CMD
+    float real_vx;               // 底盘几何中心前进速度，mm/s
+    float real_vy;               // 底盘几何中心向右速度，mm/s
+    float real_wz;               // 底盘逆时针角速度，degree/s
 
 } Chassis_Upload_Data_s;
 
