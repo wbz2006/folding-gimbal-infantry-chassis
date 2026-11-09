@@ -121,7 +121,8 @@ HTMotorInstance *HTMotorInit(Motor_Init_Config_s *config)
     Daemon_Init_Config_s conf = {
         .callback = HTMotorLostCallback,
         .owner_id = motor,
-        .reload_count = 5, // 20ms
+        .reload_count = 5, // 50ms
+        .require_first_reload = 1,
     };
     motor->motor_daemon = DaemonRegister(&conf);
 

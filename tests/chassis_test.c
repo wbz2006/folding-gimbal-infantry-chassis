@@ -1,9 +1,11 @@
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "crc8.h"
+#include "LK9025.h"
 #include "../application/chassis/chassis.c"
 
 UART_HandleTypeDef huart1;
@@ -11,7 +13,7 @@ CAN_HandleTypeDef hcan1, hcan2, hcan3;
 static uint32_t now_ms, irq_mask;
 static CANBusStatus bus;
 static uint8_t bus_ready = 1;
-static uint8_t sent[64];
+static uint8_t sent[CAN_COMM_MAX_BUFFSIZE + CAN_COMM_OFFSET_BYTES];
 static size_t sent_len;
 static int fail_fragment = -1, tx_count;
 static float last_budget;
@@ -101,6 +103,27 @@ static void stopped(uint8_t expected)
     assert((steer_motor_rb->stop_flag == MOTOR_STOP) == expected);
 #endif
 }
+static void expect_motor_offline(DJIMotorInstance *motor, uint8_t expected)
+{
+    Chassis_Ctrl_Cmd_s cmd = {.vx = 100, .chassis_mode = CHASSIS_NO_FOLLOW};
+    motor->daemon->temp_count = 0;
+    assert(!MotorIsOnline(motor->daemon, motor->motor_can_instance));
+    assert(MotorIsOffline(motor->daemon, motor->motor_can_instance));
+    command(cmd, 0); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == expected);
+    App_Fault_s transmitted_fault;
+    memcpy(&transmitted_fault, sent + 2 + offsetof(Chassis_Upload_Data_s, fault), sizeof(transmitted_fault));
+    assert(transmitted_fault.motor_offline_flags == expected);
+    assert(transmitted_fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(transmitted_fault.imu_fault_flags == APP_IMU_FAULT_NONE);
+    assert(transmitted_fault.control_fault_flags == APP_CONTROL_FAULT_NONE);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == expected);
+    near(chassis_feedback_data.real_vx, 0, 0);
+    refresh(); command(cmd, 0); task(); stopped(0);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
+}
 #ifdef CHASSIS_DRIVE_SWERVE
 static void set_angle(DJIMotorInstance *motor, float degrees)
 {
@@ -136,17 +159,111 @@ static void move_feedback(float vx, float vy, float wz)
 #endif
 int main(void)
 {
+    // Exercise the shared application update independently of chassis devices and command timers.
+    DaemonInstance app_daemon = {0};
+    App_Fault_s app_fault = {
+        .comm_fault_flags = APP_COMM_FAULT_COMMAND_OFFLINE,
+        .control_fault_flags = APP_CONTROL_FAULT_VIDEO_OFFLINE,
+    };
+    assert(AppFaultUpdate(&app_daemon, &app_fault) == 0x02000100);
+    assert(DaemonGetFaultFlags(&app_daemon) == 0x02000100);
+    assert(DaemonIsFeedbackValid(&app_daemon));
+    assert(!DaemonHasReloaded(&app_daemon));
+    app_fault.motor_offline_flags = MOTOR_8_OFFLINE;
+    assert(AppFaultUpdate(&app_daemon, &app_fault) == 0x02000180);
+    assert(!DaemonIsFeedbackValid(&app_daemon));
+    app_fault.motor_offline_flags = MOTOR_OFFLINE_NONE;
+    app_fault.imu_fault_flags = APP_IMU_FAULT_DATA_INVALID;
+    assert(AppFaultUpdate(&app_daemon, &app_fault) == 0x02020100);
+    assert(!DaemonIsFeedbackValid(&app_daemon));
+    app_fault.imu_fault_flags = APP_IMU_FAULT_NONE;
+    app_fault.comm_fault_flags = APP_COMM_FAULT_FEEDBACK_OFFLINE;
+    assert(AppFaultUpdate(&app_daemon, &app_fault) == 0x02000200);
+    assert(!DaemonIsFeedbackValid(&app_daemon));
+    app_fault = (App_Fault_s){0};
+    assert(AppFaultUpdate(&app_daemon, &app_fault) == 0);
+    assert(DaemonGetFaultFlags(&app_daemon) == 0);
+    assert(DaemonIsFeedbackValid(&app_daemon));
+
     ChassisInit(); stopped(1);
     assert(chasiss_can_comm->can_ins->can_handle == &hcan3);
     assert(chasiss_can_comm->can_ins->tx_id == 0x311 && chasiss_can_comm->can_ins->rx_id == 0x312);
     assert(!CANCommIsOnline(chasiss_can_comm));
+    assert(!MotorIsOnline(NULL, NULL) && MotorIsOffline(NULL, NULL));
+    assert(MotorIsOffline(motor_lf->daemon, motor_lf->motor_can_instance));
+#ifdef CHASSIS_DRIVE_SWERVE
+    assert(ChassisMotorOfflineFlags() == 0xFF);
+#else
+    assert(ChassisMotorOfflineFlags() == 0x0F);
+#endif
+    // Exercise the production receive callback and daemon timeout, independently of output enable.
+    uint8_t feedback[8] = {0};
+    inject(motor_lf->motor_can_instance, feedback, sizeof(feedback));
+    assert(MotorIsOnline(motor_lf->daemon, motor_lf->motor_can_instance));
+    assert(!MotorIsOffline(motor_lf->daemon, motor_lf->motor_can_instance));
+    assert(!MotorIsOnline(motor_lf->daemon, NULL));
+    assert(!MotorIsOnline(NULL, motor_lf->motor_can_instance));
+    assert(motor_lf->stop_flag == MOTOR_STOP);
+    for (unsigned i = 0; i < motor_lf->daemon->reload_count; ++i) DaemonTask();
+    assert(MotorIsOffline(motor_lf->daemon, motor_lf->motor_can_instance));
+    inject(motor_lf->motor_can_instance, feedback, sizeof(feedback));
+    assert(MotorIsOnline(motor_lf->daemon, motor_lf->motor_can_instance));
+    // The same interface also accepts a non-DJI motor, with its own timeout window.
+    Motor_Init_Config_s lk_config = {
+        .can_init_config = {.can_handle = &hcan2, .tx_id = 1},
+        .motor_type = LK9025,
+    };
+    LKMotorInstance *lk = LKMotorInit(&lk_config);
+    assert(MotorIsOffline(lk->daemon, lk->motor_can_ins) && !LKMotorIsOnline(lk));
+    inject(lk->motor_can_ins, feedback, sizeof(feedback));
+    LKMotorStop(lk);
+    assert(MotorIsOnline(lk->daemon, lk->motor_can_ins) && LKMotorIsOnline(lk));
+    bus_ready = 0;
+    assert(MotorIsOffline(lk->daemon, lk->motor_can_ins) && !LKMotorIsOnline(lk));
+    bus_ready = 1;
+    for (unsigned i = 0; i < lk->daemon->reload_count; ++i) DaemonTask();
+    assert(MotorIsOffline(lk->daemon, lk->motor_can_ins));
     refresh();
+    *Chassis_IMU_data = (attitude_t){
+        .Gyro = {0.1f, -0.2f, 0.3f}, .Accel = {1.0f, -2.0f, 9.81f},
+        .Roll = 12.5f, .Pitch = -23.5f, .Yaw = 34.5f, .YawTotalAngle = 754.5f,
+    };
     Chassis_Ctrl_Cmd_s cmd = {.vx = 1000, .chassis_mode = CHASSIS_NO_FOLLOW};
     command(cmd, 0); task(); stopped(0);
-    assert(chassis_feedback_data.fault_flags == APP_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.imu_fault_flags == APP_IMU_FAULT_NONE);
+    assert(chassis_feedback_data.fault.control_fault_flags == APP_CONTROL_FAULT_NONE);
     assert(bus.online && sent_len == sizeof(Chassis_Upload_Data_s) + CAN_COMM_OFFSET_BYTES);
     assert(sent[0] == CAN_COMM_HEADER && sent[1] == sizeof(Chassis_Upload_Data_s));
     assert(sent[sent_len - 2] == crc_8(sent + 2, sizeof(Chassis_Upload_Data_s)));
+    assert(tx_count == 9 && sent_len == 69);
+    assert(chasiss_can_comm->can_ins->txconf.DataLength == 5);
+
+    // Reassemble the full 65-byte production feedback through a receiving CANComm instance.
+    CANComm_Init_Config_s peer_config = {
+        .can_config = {.can_handle = &hcan3, .tx_id = 0x312, .rx_id = 0x311},
+        .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .recv_data_len = sizeof(Chassis_Upload_Data_s),
+        .daemon_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
+    };
+    CANCommInstance *peer = CANCommInit(&peer_config);
+    assert(peer != NULL);
+    for (size_t i = 0; i < sent_len; i += 8)
+        inject(peer->can_ins, sent + i, sent_len - i >= 8 ? 8 : sent_len - i);
+    Chassis_Upload_Data_s received_feedback;
+    assert(CANCommReceive(peer, &received_feedback));
+    assert(memcmp(&received_feedback, &chassis_feedback_data, sizeof(received_feedback)) == 0);
+    assert(memcmp(&received_feedback.chassis_imu_data, Chassis_IMU_data, sizeof(attitude_t)) == 0);
+
+    sent[sent_len - 2] ^= 1;
+    for (size_t i = 0; i < sent_len; i += 8)
+        inject(peer->can_ins, sent + i, sent_len - i >= 8 ? 8 : sent_len - i);
+    assert(peer->rx_ok_count == 1 && peer->rx_error_count == 1);
+    Chassis_IMU_data->YawTotalAngle = 1114.5f;
+    task();
+    memcpy(&received_feedback, sent + 2, sizeof(received_feedback));
+    near(received_feedback.chassis_imu_data.YawTotalAngle, 1114.5f, 0);
 #ifdef CHASSIS_DRIVE_SWERVE
     assert(motor_lf->motor_can_instance->rx_id == 0x201);
     assert(steer_motor_lf->motor_can_instance->rx_id == 0x205);
@@ -226,27 +343,79 @@ int main(void)
     cmd.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW; command(cmd,0); task(); near(chassis_cmd_recv.wz,-4500,0.001f);
     cmd.chassis_mode = CHASSIS_ROTATE; command(cmd,0); task(); near(chassis_cmd_recv.wz,4000,0.001f);
     cmd.chassis_mode = CHASSIS_NO_FOLLOW; command(cmd,0); task();
+    task(); stopped(0); // No new packet this cycle: the latest command is still valid.
     uint32_t received = chasiss_can_comm->rx_ok_count;
     command(cmd, 1); assert(chasiss_can_comm->rx_ok_count == received);
     uint8_t first[8] = {CAN_COMM_HEADER, sizeof(cmd)};
     inject(chasiss_can_comm->can_ins, first, 8); now_ms += CAN_COMM_RX_FRAGMENT_TIMEOUT_MS;
     command(cmd,0); assert(chasiss_can_comm->rx_ok_count == received + 1);
     bus.bus_off_count++; task(); stopped(1);
-    assert(chassis_feedback_data.fault_flags & APP_FAULT_COMMAND_STALE);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_COMMAND_OFFLINE);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == ((uint32_t)APP_COMM_FAULT_COMMAND_OFFLINE << 8));
     assert(!CANCommIsOnline(chasiss_can_comm));
     command(cmd,0); task(); stopped(0);
-    for (unsigned i=0; i<DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS); ++i) { now_ms+=10; DaemonTask(); }
-    refresh(); task(); stopped(1); assert(chassis_feedback_data.fault_flags & APP_FAULT_COMMAND_STALE);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    // Bad CRC packets must not keep the command alive after the receive timeout.
+    for (unsigned i=0; i<DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS); ++i) { now_ms+=10; command(cmd,1); DaemonTask(); }
+    refresh(); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_COMMAND_OFFLINE);
     command(cmd,0); task(); stopped(0);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    expect_motor_offline(motor_lf, MOTOR_1_OFFLINE);
+    expect_motor_offline(motor_rf, MOTOR_2_OFFLINE);
+    expect_motor_offline(motor_lb, MOTOR_3_OFFLINE);
+    expect_motor_offline(motor_rb, MOTOR_4_OFFLINE);
+    motor_lf->daemon->temp_count = 0;
+    motor_rb->daemon->temp_count = 0;
+    command(cmd,0); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == (MOTOR_1_OFFLINE | MOTOR_4_OFFLINE));
+    refresh(); command(cmd,0); task(); stopped(0);
 #ifdef CHASSIS_DRIVE_SWERVE
-    steer_motor_lb->daemon->temp_count = 0; task(); stopped(1);
-    assert(chassis_feedback_data.fault_flags & APP_FAULT_FEEDBACK_STALE);
-    near(chassis_feedback_data.real_vx,0,0); refresh();
+    expect_motor_offline(steer_motor_lf, MOTOR_5_OFFLINE);
+    expect_motor_offline(steer_motor_rf, MOTOR_6_OFFLINE);
+    expect_motor_offline(steer_motor_lb, MOTOR_7_OFFLINE);
+    expect_motor_offline(steer_motor_rb, MOTOR_8_OFFLINE);
+    motor_lf->daemon->temp_count = 0;
+    steer_motor_rf->daemon->temp_count = 0;
+    command(cmd,0); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == (MOTOR_1_OFFLINE | MOTOR_6_OFFLINE));
+    refresh(); command(cmd,0); task(); stopped(0);
 #endif
-    bus_ready = 0; task(); stopped(1); bus_ready=1; command(cmd,0); task(); stopped(0);
+    bus_ready = 0; task(); stopped(1);
+    assert(MotorIsOffline(motor_lf->daemon, motor_lf->motor_can_instance));
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_COMMAND_OFFLINE);
+#ifdef CHASSIS_DRIVE_SWERVE
+    assert(chassis_feedback_data.fault.motor_offline_flags == 0xFF);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0x000001FF);
+#else
+    assert(chassis_feedback_data.fault.motor_offline_flags == 0x0F);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0x0000010F);
+#endif
+    bus_ready=1; command(cmd,0); task(); stopped(0);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(chassis_feedback_data.fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
+    // Supply classified results directly: the IMU/control monitors are not connected yet.
+    chassis_feedback_data.fault.imu_fault_flags = APP_IMU_FAULT_OFFLINE;
+    chassis_feedback_data.fault.control_fault_flags = APP_CONTROL_FAULT_REMOTE_OFFLINE;
+    command(cmd,0); task(); stopped(1);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0x01010000);
+    assert(!DaemonIsFeedbackValid(chassis_cmd_daemon));
+    App_Fault_s transmitted_fault;
+    memcpy(&transmitted_fault, sent + 2 + offsetof(Chassis_Upload_Data_s, fault), sizeof(transmitted_fault));
+    assert(transmitted_fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
+    assert(transmitted_fault.comm_fault_flags == APP_COMM_FAULT_NONE);
+    assert(transmitted_fault.imu_fault_flags == APP_IMU_FAULT_OFFLINE);
+    assert(transmitted_fault.control_fault_flags == APP_CONTROL_FAULT_REMOTE_OFFLINE);
+    chassis_feedback_data.fault.imu_fault_flags = APP_IMU_FAULT_NONE;
+    chassis_feedback_data.fault.control_fault_flags = APP_CONTROL_FAULT_NONE;
+    command(cmd,0); task(); stopped(0);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0);
     cmd.vx = NAN; command(cmd,0); task(); stopped(1);
-    assert(chassis_feedback_data.fault_flags & APP_FAULT_INVALID_COMMAND);
-    cmd.vx=1000; cmd.chassis_mode=CHASSIS_FOLDED_ROTATE; command(cmd,0); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_INVALID_COMMAND);
+    cmd.vx=1000; cmd.chassis_mode=(chassis_mode_e)4; command(cmd,0); task(); stopped(1);
+    assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_INVALID_COMMAND);
     cmd.chassis_mode=CHASSIS_ZERO_FORCE; command(cmd,0); task(); stopped(1);
     near(motor_lf->motor_controller.pid_ref,0,0);
     PIDInstance pid; PID_Init_Config_s cfg={.Kp=3,.Ki=2,.MaxOut=100,.IntegralLimit=10};

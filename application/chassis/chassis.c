@@ -58,9 +58,9 @@ static DJIMotorInstance *steer_motor_lf, *steer_motor_rf, *steer_motor_lb, *stee
 static float steer_target_lf, steer_target_rf, steer_target_lb, steer_target_rb;
 #endif
 // 在线判断函数声明
-static uint8_t ChassisFeedbackValid(void);
+static uint8_t ChassisMotorOfflineFlags(void);
 static uint8_t ChassisCommandValid(void);
-static void SetChassisEnabled(uint8_t enabled);
+static void SetChassisEnabled(Motor_Working_Type_e state);
 
 /* 用于自旋变速策略的时间变量 */
 // static float t;
@@ -124,7 +124,7 @@ void ChassisInit()
             .angle_feedback_source = MOTOR_FEED,
             .speed_feedback_source = MOTOR_FEED,
             .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = ANGLE_LOOP | SPEED_LOOP | CURRENT_LOOP,
+            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
         },
         .controller_param_init_config = {
             .angle_PID = {
@@ -142,14 +142,6 @@ void ChassisInit()
                 .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 12000,
-            },
-            .current_PID = {
-                .Kp = 0.5, // 0.4
-                .Ki = 0,   // 0
-                .Kd = 0,
-                .IntegralLimit = 3000,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .MaxOut = 15000,
             },
         },
         .motor_type = GM6020,
@@ -170,7 +162,7 @@ void ChassisInit()
     steer_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     steer_motor_rb = DJIMotorInit(&steer_motor_config);
 #endif
-    SetChassisEnabled(0);
+    SetChassisEnabled(MOTOR_STOP);
 
     referee_data = UITaskInit(&huart1,&ui_data); // 裁判系统初始化,会同时初始化UI
 
@@ -197,17 +189,19 @@ void ChassisInit()
         .daemon_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
     };
     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
+    // 双板复用通信 daemon 的计时与状态存储，不再额外注册一层命令超时。
+    chassis_cmd_daemon = chasiss_can_comm->comm_daemon;
 #endif                                          // CHASSIS_BOARD
 
 #ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
     chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
     chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
-#endif // ONE_BOARD
     Daemon_Init_Config_s cmd_daemon_config = {
         .reload_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
         .require_first_reload = 1,
     };
     chassis_cmd_daemon = DaemonRegister(&cmd_daemon_config);
+#endif // ONE_BOARD
 }
 
 #define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
@@ -443,50 +437,42 @@ static void EstimateSpeed()
  */
 void ChassisTask()
 {
-    // 单板从消息中心取命令，底盘板从双板 CAN 通信取命令。
-    uint8_t command_received = 0;
+    uint8_t command_available = 0;
 #ifdef ONE_BOARD
-    command_received = SubGetMessage(chassis_sub, &chassis_cmd_recv);
-#endif
-#ifdef CHASSIS_BOARD
-    command_received = CANCommReceive(chasiss_can_comm, &chassis_cmd_recv);
-#endif
-    // CANCommReceive 返回的是“最近有效整包仍在线”，不要求本周期一定收到新帧。
-    // 无效 CRC 包不会刷新通信 daemon；通信超时或 Bus-Off 未恢复时返回 0。
-    if (command_received)
+    // 消息中心没有接收超时管理：只在收到新命令时喂狗，周期之间沿用未超时的命令。
+    if (SubGetMessage(chassis_sub, &chassis_cmd_recv))
         DaemonReload(chassis_cmd_daemon);
-
-    uint32_t fault_flags = APP_FAULT_NONE;
-    if (DaemonIsOnline(chassis_cmd_daemon) == 0)
-        fault_flags |= APP_FAULT_COMMAND_STALE;
-
+    command_available = DaemonIsOnline(chassis_cmd_daemon);
+#endif
 #ifdef CHASSIS_BOARD
-    // 双板通信自身离线立即参与停机仲裁，不再等待底盘命令 daemon 的下一层超时。
-    if (CANCommIsOnline(chasiss_can_comm) == 0)
-        fault_flags |= APP_FAULT_COMMAND_STALE;
+    // 通信模块已检查完整包、CRC、接收超时及总线状态；在线时可返回最近的有效命令。
+    // 返回 0 时不再使用接收缓存，也不在底盘中增加第二层超时等待。
+    command_available = CANCommReceive(chasiss_can_comm, &chassis_cmd_recv);
 #endif
 
-    const uint8_t feedback_valid = ChassisFeedbackValid();
-    DaemonSetFeedbackValid(chassis_cmd_daemon, feedback_valid);
-    if (feedback_valid == 0)
-        fault_flags |= APP_FAULT_FEEDBACK_STALE;
+    // 每周期覆盖已接入的分类状态，通信和电机分别记录，不再另存一份重复的汇总位。
+    chassis_feedback_data.fault.comm_fault_flags = command_available ?
+        APP_COMM_FAULT_NONE : APP_COMM_FAULT_COMMAND_OFFLINE;
 
+    // 命令可用不代表电机在线；按当前底盘构型检查全部轮向和所需舵向电机。
+    // 公共故障结构保存本应用的电机离线位；反馈是否完整则供 EstimateSpeed 判断能否估速。
+    chassis_feedback_data.fault.motor_offline_flags = ChassisMotorOfflineFlags();
+    // 通信校验只保证报文完整，速度中的 NaN/Inf 或不支持的模式仍需由底盘拒绝。
     if (ChassisCommandValid() == 0)
-        fault_flags |= APP_FAULT_INVALID_COMMAND;
+        chassis_feedback_data.fault.comm_fault_flags |= APP_COMM_FAULT_INVALID_COMMAND;
 
-    // 底盘上传的故障位汇总本周期检查结果，任意故障都会清零命令并停机。
-    DaemonSetFaultFlags(chassis_cmd_daemon, fault_flags);
-    chassis_feedback_data.fault_flags = (uint8_t)DaemonGetFaultFlags(chassis_cmd_daemon);
-
-    if (chassis_feedback_data.fault_flags != APP_FAULT_NONE)
+    // 通用函数同步故障快照和设备反馈有效性；底盘自身负责故障后的命令清除与停机。
+    if (AppFaultUpdate(chassis_cmd_daemon, &chassis_feedback_data.fault) != 0)
     {
-        // 命令、反馈、通信或输入数据任一故障，清空控制量并进入零力矩。
+        // 清除故障前的速度、偏角和可能的非有限值，避免继续参与后面的坐标变换与解算。
+        // 下一周期重新接收并检查命令，全部检查通过后才允许恢复运动。
         memset(&chassis_cmd_recv, 0, sizeof(chassis_cmd_recv));
         chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
     }
 
+    // 故障停机和主动零力矩命令共用出口：停止所有底盘电机，并清除使能期间的 PID 历史。
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
-        SetChassisEnabled(0);
+        SetChassisEnabled(MOTOR_STOP);
 
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode)
@@ -533,7 +519,9 @@ void ChassisTask()
     // 限制轮向电机速度并写入轮向、舵向闭环参考值。
     LimitChassisOutput();
     if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE)
-        SetChassisEnabled(1);
+    {
+        SetChassisEnabled(MOTOR_ENALBED);
+    }
 
     // 根据电机的反馈速度和舵角计算真实速度；当前不使用 IMU。
     EstimateSpeed();
@@ -550,31 +538,33 @@ void ChassisTask()
     PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
+    // 回传底盘 IMU 的三轴角速度、加速度和姿态；轮速反解仍独立使用电机反馈。
+    chassis_feedback_data.chassis_imu_data = *Chassis_IMU_data;
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
 #endif // CHASSIS_BOARD
 }
 
 /**
- * @brief 检查当前底盘构型所需的电机反馈和 CAN 总线是否有效。
- * @return uint8_t 所有轮向电机及舵轮构型下的舵向电机均在线且 CAN 就绪时返回 1，否则返回 0。
+ * @brief 检查当前底盘构型的全部电机，生成公共故障结构中的电机离线位。
+ * @return uint8_t 需要的电机全部在线时返回 MOTOR_OFFLINE_NONE，否则返回各离线电机对应位的组合。
  */
-static uint8_t ChassisFeedbackValid(void)
+static uint8_t ChassisMotorOfflineFlags(void)
 {
-    // DJI 电机收到有效反馈时刷新各自 daemon；任一 M3508 或 GM6020 超时，整车停机。
-    // CANIsReady 同时拦截 CAN 总线未运行、Bus-Off 或尚未恢复的情况。
-    if (!DaemonIsOnline(motor_lf->daemon) || !CANIsReady(motor_lf->motor_can_instance) ||
-        !DaemonIsOnline(motor_rf->daemon) || !CANIsReady(motor_rf->motor_can_instance) ||
-        !DaemonIsOnline(motor_lb->daemon) || !CANIsReady(motor_lb->motor_can_instance) ||
-        !DaemonIsOnline(motor_rb->daemon) || !CANIsReady(motor_rb->motor_can_instance))
-        return 0;
+    // 每周期清零重算，恢复在线后自动清除对应位；逐个检查，不能发现一个离线就提前返回。
+    uint8_t offline_flags = MOTOR_OFFLINE_NONE;
+    // 电机 1～4：各底盘构型共用的 LF/RF/LB/RB 轮向电机。
+    if (MotorIsOffline(motor_lf->daemon, motor_lf->motor_can_instance)) offline_flags |= MOTOR_1_OFFLINE;
+    if (MotorIsOffline(motor_rf->daemon, motor_rf->motor_can_instance)) offline_flags |= MOTOR_2_OFFLINE;
+    if (MotorIsOffline(motor_lb->daemon, motor_lb->motor_can_instance)) offline_flags |= MOTOR_3_OFFLINE;
+    if (MotorIsOffline(motor_rb->daemon, motor_rb->motor_can_instance)) offline_flags |= MOTOR_4_OFFLINE;
 #ifdef CHASSIS_DRIVE_SWERVE
-    if (!DaemonIsOnline(steer_motor_lf->daemon) || !CANIsReady(steer_motor_lf->motor_can_instance) ||
-        !DaemonIsOnline(steer_motor_rf->daemon) || !CANIsReady(steer_motor_rf->motor_can_instance) ||
-        !DaemonIsOnline(steer_motor_lb->daemon) || !CANIsReady(steer_motor_lb->motor_can_instance) ||
-        !DaemonIsOnline(steer_motor_rb->daemon) || !CANIsReady(steer_motor_rb->motor_can_instance))
-        return 0;
+    // 电机 5～8：仅舵轮构型使用。
+    if (MotorIsOffline(steer_motor_lf->daemon, steer_motor_lf->motor_can_instance)) offline_flags |= MOTOR_5_OFFLINE;
+    if (MotorIsOffline(steer_motor_rf->daemon, steer_motor_rf->motor_can_instance)) offline_flags |= MOTOR_6_OFFLINE;
+    if (MotorIsOffline(steer_motor_lb->daemon, steer_motor_lb->motor_can_instance)) offline_flags |= MOTOR_7_OFFLINE;
+    if (MotorIsOffline(steer_motor_rb->daemon, steer_motor_rb->motor_can_instance)) offline_flags |= MOTOR_8_OFFLINE;
 #endif
-    return 1;
+    return offline_flags;
 }
 
 /**
@@ -595,11 +585,11 @@ static uint8_t ChassisCommandValid(void)
 
 /**
  * @brief 统一使能或停止底盘轮向电机及舵向电机。
- * @param enabled 非零时使能电机；为零时清除 PID 状态、停止输出，并在舵轮构型下保持当前舵角。
+ * @param state MOTOR_ENALBED 使能电机；MOTOR_STOP 清除 PID 状态、停止输出，并在舵轮构型下保持当前舵角。
  */
-static void SetChassisEnabled(uint8_t enabled)
+static void SetChassisEnabled(Motor_Working_Type_e state)
 {
-    if (enabled)
+    if (state == MOTOR_ENALBED)
     {
         // 同一使能门控覆盖驱动轮和舵向电机，避免故障恢复时只启用部分轮组。
         DJIMotorEnable(motor_lf);

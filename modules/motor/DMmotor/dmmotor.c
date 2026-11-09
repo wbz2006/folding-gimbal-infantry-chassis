@@ -133,8 +133,7 @@ static void DMMotorDecode(CANInstance *motor_can)
 uint8_t DMMotorIsFeedbackValid(DMMotorInstance *motor)
 {
     if (motor == NULL || motor->motor_can_instace == NULL ||
-        !CANIsReady(motor->motor_can_instace) ||
-        !DaemonIsOnline(motor->motor_daemon))
+        MotorIsOffline(motor->motor_daemon, motor->motor_can_instace))
         return 0;
     const CANBusStatus *bus = CANGetBusStatus(motor->motor_can_instace);
     return bus != NULL && motor->feedback_bus_off_count == bus->bus_off_count &&

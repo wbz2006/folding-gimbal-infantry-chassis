@@ -85,6 +85,21 @@ uint32_t DaemonGetFaultFlags(DaemonInstance *instance)
     return instance != NULL ? instance->fault_flags : UINT32_MAX;
 }
 
+uint32_t AppFaultUpdate(DaemonInstance *daemon, const App_Fault_s *fault)
+{
+    const uint32_t fault_flags = (uint32_t)fault->motor_offline_flags |
+        ((uint32_t)fault->comm_fault_flags << 8) |
+        ((uint32_t)fault->imu_fault_flags << 16) |
+        ((uint32_t)fault->control_fault_flags << 24);
+
+    DaemonSetFeedbackValid(daemon,
+        fault->motor_offline_flags == MOTOR_OFFLINE_NONE &&
+        fault->imu_fault_flags == APP_IMU_FAULT_NONE &&
+        (fault->comm_fault_flags & APP_COMM_FAULT_FEEDBACK_OFFLINE) == 0);
+    DaemonSetFaultFlags(daemon, fault_flags);
+    return fault_flags;
+}
+
 void DaemonTask()
 {
     CANServiceTask(); // 在现有10ms任务中维护CAN，各应用无需额外调用
