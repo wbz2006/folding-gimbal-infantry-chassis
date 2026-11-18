@@ -2,6 +2,17 @@
 #include "main.h"
 
 SPI_HandleTypeDef *BMI088_SPI;
+static uint8_t spi_failed;
+
+void BMI088_BeginTransfer(void)
+{
+    spi_failed = 0;
+}
+
+uint8_t BMI088_TransferFailed(void)
+{
+    return spi_failed;
+}
 
 void BMI088_ACCEL_NS_L(void)
 {
@@ -23,7 +34,14 @@ void BMI088_GYRO_NS_H(void)
 
 uint8_t BMI088_read_write_byte(uint8_t txdata)
 {
-    uint8_t rx_data;
-    HAL_SPI_TransmitReceive(BMI088_SPI, &txdata, &rx_data, 1, 1000);
+    uint8_t rx_data = 0;
+    if (spi_failed)
+        return 0;
+    // 初始化在 INS 任务中运行，HAL tick 已启用；首次失败后跳过本次操作的其余字节。
+    if (HAL_SPI_TransmitReceive(BMI088_SPI, &txdata, &rx_data, 1, 1) != HAL_OK)
+    {
+        spi_failed = 1;
+        return 0;
+    }
     return rx_data;
 }

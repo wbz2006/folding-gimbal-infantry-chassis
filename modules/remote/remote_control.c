@@ -95,8 +95,14 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
  */
 static void RemoteControlRxCallback()
 {
-    DaemonReload(rc_daemon_instance);         // 先喂狗
-    sbus_to_rc(rc_usart_instance->recv_buff); // 进行协议解析
+    if (rc_usart_instance->recv_len != REMOTE_CONTROL_FRAME_SIZE)
+        return;
+    const uint8_t right = (rc_usart_instance->recv_buff[5] >> 4) & 0x03;
+    const uint8_t left = (rc_usart_instance->recv_buff[5] >> 6) & 0x03;
+    if (left == 0 || right == 0)
+        return;
+    sbus_to_rc(rc_usart_instance->recv_buff);
+    DaemonReload(rc_daemon_instance);
 }
 
 /**

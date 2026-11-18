@@ -92,17 +92,23 @@ static uint8_t BMI088_Gyro_Init_Table[BMI088_WRITE_GYRO_REG_NUM][3] =
 
 };
 
-static void Calibrate_MPU_Offset(IMU_Data_t *bmi088);
+static uint8_t Calibrate_MPU_Offset(IMU_Data_t *bmi088);
 
 uint8_t BMI088Init(SPI_HandleTypeDef *bmi088_SPI, uint8_t calibrate)
 {
     BMI088_SPI = bmi088_SPI;
+    BMI088_BeginTransfer();
     error = BMI088_NO_ERROR;
 
     error |= bmi088_accel_init();
     error |= bmi088_gyro_init();
+    if (error != BMI088_NO_ERROR || BMI088_TransferFailed())
+        return BMI088_NO_SENSOR;
     if (calibrate)
-        Calibrate_MPU_Offset(&BMI088);
+    {
+        if (!Calibrate_MPU_Offset(&BMI088))
+            return BMI088_NO_SENSOR;
+    }
     else
     {
         BMI088.GyroOffset[0] = GxOFFSET;
@@ -116,7 +122,7 @@ uint8_t BMI088Init(SPI_HandleTypeDef *bmi088_SPI, uint8_t calibrate)
     return error;
 }
 
-void Calibrate_MPU_Offset(IMU_Data_t *bmi088)
+static uint8_t Calibrate_MPU_Offset(IMU_Data_t *bmi088)
 {
     static float startTime;
     static uint16_t CaliTimes = 6000;
@@ -161,6 +167,8 @@ void Calibrate_MPU_Offset(IMU_Data_t *bmi088)
             bmi088->gNorm += gNormTemp;
 
             BMI088_gyro_read_muli_reg(BMI088_GYRO_CHIP_ID, buf, 8);
+            if (BMI088_TransferFailed() || buf[0] != BMI088_GYRO_CHIP_ID_VALUE)
+                return 0;
             if (buf[0] == BMI088_GYRO_CHIP_ID_VALUE)
             {
                 bmi088_raw_temp = (int16_t)((buf[3]) << 8) | buf[2];
@@ -219,6 +227,8 @@ void Calibrate_MPU_Offset(IMU_Data_t *bmi088)
             bmi088->GyroOffset[i] /= (float)CaliTimes;
 
         BMI088_accel_read_muli_reg(BMI088_TEMP_M, buf, 2);
+        if (BMI088_TransferFailed())
+            return 0;
         bmi088_raw_temp = (int16_t)((buf[0] << 3) | (buf[1] >> 5));
         if (bmi088_raw_temp > 1023)
             bmi088_raw_temp -= 2048;
@@ -235,6 +245,7 @@ void Calibrate_MPU_Offset(IMU_Data_t *bmi088)
              fabsf(bmi088->GyroOffset[2]) > 0.01f);
 
     bmi088->AccelScale = 9.81f / bmi088->gNorm;
+    return 1;
 }
 
 uint8_t bmi088_accel_init(void)
@@ -273,9 +284,7 @@ uint8_t bmi088_accel_init(void)
 
         if (res != BMI088_Accel_Init_Table[write_reg_num][1])
         {
-            // write_reg_num--;
-            // return BMI088_Accel_Init_Table[write_reg_num][2];
-            error |= BMI088_Accel_Init_Table[write_reg_num][2];
+            return BMI088_Accel_Init_Table[write_reg_num][2];
         }
     }
     return BMI088_NO_ERROR;
@@ -318,21 +327,22 @@ uint8_t bmi088_gyro_init(void)
 
         if (res != BMI088_Gyro_Init_Table[write_reg_num][1])
         {
-            write_reg_num--;
-            // return BMI088_Gyro_Init_Table[write_reg_num][2];
-            error |= BMI088_Accel_Init_Table[write_reg_num][2];
+            return BMI088_Gyro_Init_Table[write_reg_num][2];
         }
     }
 
     return BMI088_NO_ERROR;
 }
 
-void BMI088_Read(IMU_Data_t *bmi088)
+uint8_t BMI088_Read(IMU_Data_t *bmi088)
 {
+    BMI088_BeginTransfer();
     static uint8_t buf[8] = {0};
     static int16_t bmi088_raw_temp;
 
     BMI088_accel_read_muli_reg(BMI088_ACCEL_XOUT_L, buf, 6);
+    if (BMI088_TransferFailed())
+        return 0;
 
     bmi088_raw_temp = (int16_t)((buf[1]) << 8) | buf[0];
     bmi088->Accel[0] = bmi088_raw_temp * BMI088_ACCEL_SEN * bmi088->AccelScale;
@@ -342,6 +352,8 @@ void BMI088_Read(IMU_Data_t *bmi088)
     bmi088->Accel[2] = bmi088_raw_temp * BMI088_ACCEL_SEN * bmi088->AccelScale;
 
     BMI088_gyro_read_muli_reg(BMI088_GYRO_CHIP_ID, buf, 8);
+    if (BMI088_TransferFailed() || buf[0] != BMI088_GYRO_CHIP_ID_VALUE)
+        return 0;
     if (buf[0] == BMI088_GYRO_CHIP_ID_VALUE)
     {
         if (caliOffset)
@@ -364,6 +376,8 @@ void BMI088_Read(IMU_Data_t *bmi088)
         }
     }
     BMI088_accel_read_muli_reg(BMI088_TEMP_M, buf, 2);
+    if (BMI088_TransferFailed())
+        return 0;
 
     bmi088_raw_temp = (int16_t)((buf[0] << 3) | (buf[1] >> 5));
 
@@ -373,6 +387,7 @@ void BMI088_Read(IMU_Data_t *bmi088)
     }
 
     bmi088->Temperature = bmi088_raw_temp * BMI088_TEMP_FACTOR + BMI088_TEMP_OFFSET;
+    return 1;
 }
 
 #if defined(BMI088_USE_SPI)

@@ -20,10 +20,14 @@
 #include "general_def.h"
 #include "master_process.h"
 #include "arm_math.h"
+#include "daemon.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
-static PIDInstance TempCtrl = {0};
+static uint8_t init_attempted;
+static volatile uint8_t imu_fault_flags = APP_IMU_FAULT_OFFLINE;
+static volatile uint8_t has_sample;
+static volatile uint32_t last_sample_tick;
 
 const float xb[3] = {1, 0, 0};
 const float yb[3] = {0, 1, 0};
@@ -32,7 +36,6 @@ const float zb[3] = {0, 0, 1};
 // 用于获取两次采样之间的时间间隔
 static uint32_t INS_DWT_Count = 0;
 static float dt = 0, t = 0;
-static float RefTemp = 40; // 恒温设定温度
 
 static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3], float accel[3]);
 
@@ -41,18 +44,8 @@ static void IMUPWMSet(uint16_t pwm)
     __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_4, pwm);
 }
 
-/**
- * @brief 温度控制
- *
- */
-static void IMU_Temperature_Ctrl(void)
-{
-    PIDCalculate(&TempCtrl, BMI088.Temperature, RefTemp);
-    IMUPWMSet(float_constrain(float_rounding(TempCtrl.Output), 0, UINT32_MAX));
-}
-
 // 使用加速度计的数据初始化Roll和Pitch,而Yaw置0,这样可以避免在初始时候的姿态估计误差
-static void InitQuaternion(float *init_q4)
+static uint8_t InitQuaternion(float *init_q4)
 {
     float acc_init[3] = {0};
     float gravity_norm[3] = {0, 0, 1}; // 导航系重力加速度矢量,归一化后为(0,0,1)
@@ -60,7 +53,8 @@ static void InitQuaternion(float *init_q4)
     // 读取100次加速度计数据,取平均值作为初始值
     for (uint8_t i = 0; i < 100; ++i)
     {
-        BMI088_Read(&BMI088);
+        if (!BMI088_Read(&BMI088))
+            return 0;
         acc_init[X] += BMI088.Accel[X];
         acc_init[Y] += BMI088.Accel[Y];
         acc_init[Z] += BMI088.Accel[Z];
@@ -68,27 +62,48 @@ static void InitQuaternion(float *init_q4)
     }
     for (uint8_t i = 0; i < 3; ++i)
         acc_init[i] /= 100;
+    float norm = sqrtf(Dot3d(acc_init, acc_init));
+    if (!isfinite(norm) || norm < 0.001f)
+        return 0;
     Norm3d(acc_init);
     // 计算原始加速度矢量和导航系重力加速度矢量的夹角
-    float angle = acosf(Dot3d(acc_init, gravity_norm));
+    float angle = acosf(float_constrain(Dot3d(acc_init, gravity_norm), -1.0f, 1.0f));
     Cross3d(acc_init, gravity_norm, axis_rot);
-    Norm3d(axis_rot);
+    // 重力方向平行时叉积为零；水平放置用单位四元数，倒置用绕 X 轴旋转 180°。
+    if (Dot3d(axis_rot, axis_rot) < 1e-12f)
+        axis_rot[0] = 1.0f;
+    else
+        Norm3d(axis_rot);
     init_q4[0] = cosf(angle / 2.0f);
     for (uint8_t i = 0; i < 2; ++i)
         init_q4[i + 1] = axis_rot[i] * sinf(angle / 2.0f); // 轴角公式,第三轴为0(没有z轴分量)
+    return 1;
+}
+
+attitude_t *INS_GetData(void)
+{
+    return (attitude_t *)&INS.Gyro;
+}
+
+uint8_t INS_GetFaultFlags(void)
+{
+    uint8_t flags = imu_fault_flags;
+    if (!has_sample || (uint32_t)(HAL_GetTick() - last_sample_tick) >= 10U)
+        flags |= APP_IMU_FAULT_OFFLINE;
+    return flags;
 }
 
 attitude_t *INS_Init(void)
 {
-    if (!INS.init)
-        INS.init = 1;
-    else
-        return (attitude_t *)&INS.Gyro;
+    if (init_attempted)
+        return INS_GetData();
+    init_attempted = 1;
 
-    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+    IMUPWMSet(0);
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_4);
 
-    while (BMI088Init(&hspi2, 1) != BMI088_NO_ERROR)
-        ;
+    if (BMI088Init(&hspi2, 1) != BMI088_NO_ERROR)
+        return INS_GetData();
     IMU_Param.scale[X] = 1;
     IMU_Param.scale[Y] = 1;
     IMU_Param.scale[Z] = 1;
@@ -98,22 +113,17 @@ attitude_t *INS_Init(void)
     IMU_Param.flag = 1;
 
     float init_quaternion[4] = {0};
-    InitQuaternion(init_quaternion);
+    if (!InitQuaternion(init_quaternion))
+    {
+        imu_fault_flags = APP_IMU_FAULT_DATA_INVALID;
+        return INS_GetData();
+    }
     IMU_QuaternionEKF_Init(init_quaternion, 10, 0.001, 1000000, 1, 0);
-    // imu heat init
-    PID_Init_Config_s config = {.MaxOut = 800,
-                                .IntegralLimit = 80,
-                                .DeadBand = 0,
-                                .Kp = 400,
-                                .Ki = 5,
-                                .Kd = 0,
-                                .Improve = 0x01}; // enable integratiaon limit
-    PIDInit(&TempCtrl, &config);
-
     // noise of accel is relatively big and of high freq,thus lpf is used
     INS.AccelLPF = 0.0085;
     DWT_GetDeltaT(&INS_DWT_Count);
-    return (attitude_t *)&INS.Gyro; // @todo: 这里偷懒了,不要这样做! 修改INT_t结构体可能会导致异常,待修复.
+    INS.init = 1;
+    return INS_GetData();
 }
 
 /* 注意以1kHz的频率运行此任务 */
@@ -124,11 +134,18 @@ void INS_Task(void)
 
     dt = DWT_GetDeltaT(&INS_DWT_Count);
     t += dt;
+    if (!INS.init)
+        return;
 
     // ins update
     if ((count % 1) == 0)
     {
-        BMI088_Read(&BMI088);
+        if (!BMI088_Read(&BMI088))
+        {
+            imu_fault_flags = APP_IMU_FAULT_DATA_INVALID;
+            IMUPWMSet(0);
+            return;
+        }
 
         INS.Accel[X] = BMI088.Accel[X];
         INS.Accel[Y] = BMI088.Accel[Y];
@@ -146,6 +163,16 @@ void INS_Task(void)
 
         // 核心函数,EKF更新四元数
         IMU_QuaternionEKF_Update(INS.Gyro[X], INS.Gyro[Y], INS.Gyro[Z], INS.Accel[X], INS.Accel[Y], INS.Accel[Z], dt);
+
+        if (!isfinite(QEKF_INS.Roll) || !isfinite(QEKF_INS.Pitch) ||
+            !isfinite(QEKF_INS.Yaw) || !isfinite(QEKF_INS.YawTotalAngle) ||
+            !isfinite(QEKF_INS.q[0]) || !isfinite(QEKF_INS.q[1]) ||
+            !isfinite(QEKF_INS.q[2]) || !isfinite(QEKF_INS.q[3]))
+        {
+            imu_fault_flags = APP_IMU_FAULT_DATA_INVALID;
+            IMUPWMSet(0);
+            return;
+        }
 
         memcpy(INS.q, QEKF_INS.q, sizeof(QEKF_INS.q));
 
@@ -167,15 +194,11 @@ void INS_Task(void)
         INS.Pitch = QEKF_INS.Pitch;
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
+        last_sample_tick = HAL_GetTick();
+        has_sample = 1;
+        imu_fault_flags = APP_IMU_FAULT_NONE;
 
         VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
-    }
-
-    // temperature control
-    if ((count % 2) == 0)
-    {
-        // 500hz
-        IMU_Temperature_Ctrl();
     }
 
     if ((count++ % 1000) == 0)

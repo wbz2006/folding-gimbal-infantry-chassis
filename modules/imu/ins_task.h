@@ -7,8 +7,7 @@
  * @date    2022/2/23
  * @brief
  ******************************************************************************
- * @attention INS任务的初始化不要放入实时系统!应该由application拥有实例,随后在
- *            应用层调用初始化函数.
+ * @attention 应用层用 INS_GetData() 获取存储地址，硬件初始化由 INS 任务在中断开启后执行。
  *
  ******************************************************************************
  */
@@ -83,6 +82,8 @@ typedef struct
  *
  */
 attitude_t *INS_Init(void);
+attitude_t *INS_GetData(void);
+uint8_t INS_GetFaultFlags(void);
 
 /**
  * @brief 此函数放入实时系统中,以1kHz频率运行

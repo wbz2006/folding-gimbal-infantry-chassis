@@ -22,6 +22,8 @@ extern void BMI088_GYRO_NS_L(void);
 extern void BMI088_GYRO_NS_H(void);
 
 extern uint8_t BMI088_read_write_byte(uint8_t reg);
+void BMI088_BeginTransfer(void);
+uint8_t BMI088_TransferFailed(void);
 
 extern SPI_HandleTypeDef *BMI088_SPI;
 
