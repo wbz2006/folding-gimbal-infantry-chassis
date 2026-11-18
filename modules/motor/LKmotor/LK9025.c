@@ -83,6 +83,7 @@ LKMotorInstance *LKMotorInit(Motor_Init_Config_s *config)
         .callback = LKMotorLostCallback,
         .owner_id = motor,
         .reload_count = 5, // 50ms
+        .require_first_reload = 1,
     };
     motor->daemon = DaemonRegister(&daemon_config);
 
@@ -165,5 +166,5 @@ void LKMotorSetRef(LKMotorInstance *motor, float ref)
 
 uint8_t LKMotorIsOnline(LKMotorInstance *motor)
 {
-    return DaemonIsOnline(motor->daemon);
+    return motor != NULL && MotorIsOnline(motor->daemon, motor->motor_can_ins);
 }
