@@ -26,6 +26,7 @@
 #include "can_comm.h"
 #include "ins_task.h"
 static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
+attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
 static Publisher_t *chassis_pub;                    // 用于发布底盘的数据
@@ -100,6 +101,9 @@ void ChassisInit()
     motor_rb = DJIMotorInit(&chassis_motor_config);
 
     SetChassisEnabled(MOTOR_STOP);
+#ifdef CHASSIS_BOARD
+    Chassis_IMU_data = INS_GetData();
+#endif
 
     referee_data = UITaskInit(&huart1,&ui_data); // 裁判系统初始化,会同时初始化UI
 
@@ -259,7 +263,7 @@ void ChassisTask()
     // 公共故障结构保存本应用的电机离线位；反馈是否完整则供 EstimateSpeed 判断能否估速。
     chassis_feedback_data.fault.motor_offline_flags = ChassisMotorOfflineFlags();
 #ifdef CHASSIS_BOARD
-    chassis_feedback_data.fault.imu_fault_flags = APP_IMU_FAULT_NONE;
+    chassis_feedback_data.fault.imu_fault_flags = INS_GetFaultFlags();
 #endif
     // 通信校验只保证报文完整，速度中的 NaN/Inf 或不支持的模式仍需由底盘拒绝。
     if (ChassisCommandValid() == 0)
@@ -338,6 +342,7 @@ void ChassisTask()
     PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
+    chassis_feedback_data.chassis_imu_data = *Chassis_IMU_data;
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
 #endif // CHASSIS_BOARD
 }

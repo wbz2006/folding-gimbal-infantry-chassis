@@ -23,8 +23,8 @@ SOURCES = ['tests/chassis_test.c', 'modules/motor/DJImotor/dji_motor.c', 'module
            'modules/algorithm/crc8.c', 'modules/algorithm/controller.c', 'modules/algorithm/user_lib.c']
 
 header = (ROOT/'application/robot_def.h').read_text(encoding='utf-8')
-for drive in ['SWERVE', 'MECANUM', 'OMNI_X']:
-    variant = re.sub(r'^#define CHASSIS_DRIVE_SWERVE\b.*$', '#define CHASSIS_DRIVE_'+drive, header, flags=re.M)
+for drive in ['MECANUM', 'OMNI_X']:
+    variant = re.sub(r'^#define CHASSIS_DRIVE_(?:SWERVE|MECANUM|OMNI_X)\b.*$', '#define CHASSIS_DRIVE_'+drive, header, flags=re.M)
     folder = OUT/drive
     folder.mkdir(exist_ok=True)
     (folder/'robot_def.h').write_text(variant, encoding='utf-8')

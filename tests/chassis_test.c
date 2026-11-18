@@ -17,6 +17,7 @@ static uint8_t sent[CAN_COMM_MAX_BUFFSIZE + CAN_COMM_OFFSET_BYTES];
 static size_t sent_len;
 static int fail_fragment = -1, tx_count;
 static float last_budget;
+static uint8_t test_imu_fault_flags;
 
 uint32_t HAL_GetTick(void) { return now_ms; }
 uint32_t __get_PRIMASK(void) { return irq_mask; }
@@ -53,6 +54,8 @@ uint8_t CANTransmit(CANInstance *can, float timeout)
     return 1;
 }
 attitude_t *INS_Init(void) { static attitude_t imu; return &imu; }
+attitude_t *INS_GetData(void) { return INS_Init(); }
+uint8_t INS_GetFaultFlags(void) { return test_imu_fault_flags; }
 referee_info_t *UITaskInit(UART_HandleTypeDef *uart, Referee_Interactive_info_t *ui)
 { (void)uart; (void)ui; return NULL; }
 SuperCapInstance *SuperCapInit(SuperCap_Init_Config_s *config) { (void)config; return NULL; }
@@ -186,7 +189,7 @@ int main(void)
     assert(DaemonIsFeedbackValid(&app_daemon));
 
     ChassisInit(); stopped(1);
-    assert(chasiss_can_comm->can_ins->can_handle == &hcan3);
+    assert(chasiss_can_comm->can_ins->can_handle == &hcan2);
     assert(chasiss_can_comm->can_ins->tx_id == 0x311 && chasiss_can_comm->can_ins->rx_id == 0x312);
     assert(!CANCommIsOnline(chasiss_can_comm));
     assert(!MotorIsOnline(NULL, NULL) && MotorIsOffline(NULL, NULL));
@@ -242,7 +245,7 @@ int main(void)
 
     // Reassemble the full 65-byte production feedback through a receiving CANComm instance.
     CANComm_Init_Config_s peer_config = {
-        .can_config = {.can_handle = &hcan3, .tx_id = 0x312, .rx_id = 0x311},
+        .can_config = {.can_handle = &hcan2, .tx_id = 0x312, .rx_id = 0x311},
         .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
         .recv_data_len = sizeof(Chassis_Upload_Data_s),
         .daemon_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
@@ -396,20 +399,18 @@ int main(void)
     bus_ready=1; command(cmd,0); task(); stopped(0);
     assert(chassis_feedback_data.fault.comm_fault_flags == APP_COMM_FAULT_NONE);
     assert(chassis_feedback_data.fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
-    // Supply classified results directly: the IMU/control monitors are not connected yet.
-    chassis_feedback_data.fault.imu_fault_flags = APP_IMU_FAULT_OFFLINE;
-    chassis_feedback_data.fault.control_fault_flags = APP_CONTROL_FAULT_REMOTE_OFFLINE;
+    // Simulate the IMU monitor; the chassis board has no direct remote-control input.
+    test_imu_fault_flags = APP_IMU_FAULT_OFFLINE;
     command(cmd,0); task(); stopped(1);
-    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0x01010000);
+    assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0x00010000);
     assert(!DaemonIsFeedbackValid(chassis_cmd_daemon));
     App_Fault_s transmitted_fault;
     memcpy(&transmitted_fault, sent + 2 + offsetof(Chassis_Upload_Data_s, fault), sizeof(transmitted_fault));
     assert(transmitted_fault.motor_offline_flags == MOTOR_OFFLINE_NONE);
     assert(transmitted_fault.comm_fault_flags == APP_COMM_FAULT_NONE);
     assert(transmitted_fault.imu_fault_flags == APP_IMU_FAULT_OFFLINE);
-    assert(transmitted_fault.control_fault_flags == APP_CONTROL_FAULT_REMOTE_OFFLINE);
-    chassis_feedback_data.fault.imu_fault_flags = APP_IMU_FAULT_NONE;
-    chassis_feedback_data.fault.control_fault_flags = APP_CONTROL_FAULT_NONE;
+    assert(transmitted_fault.control_fault_flags == APP_CONTROL_FAULT_NONE);
+    test_imu_fault_flags = APP_IMU_FAULT_NONE;
     command(cmd,0); task(); stopped(0);
     assert(DaemonGetFaultFlags(chassis_cmd_daemon) == 0);
     cmd.vx = NAN; command(cmd,0); task(); stopped(1);
