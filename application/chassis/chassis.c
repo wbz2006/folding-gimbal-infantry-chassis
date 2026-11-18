@@ -314,8 +314,6 @@ void ChassisTask()
     MecanumCalculate();
 #elif defined(CHASSIS_DRIVE_OMNI_X)
     OmniCalculate();
-#elif defined(CHASSIS_DRIVE_SWERVE)
-    SwerveCalculate();
 #endif
 
     // 等比例限速后写入四个驱动轮的闭环参考值。
@@ -340,8 +338,6 @@ void ChassisTask()
     PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
-    // 回传底盘 IMU 的三轴角速度、加速度和姿态；轮速反解仍独立使用电机反馈。
-    chassis_feedback_data.chassis_imu_data = *Chassis_IMU_data;
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
 #endif // CHASSIS_BOARD
 }
