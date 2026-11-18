@@ -16,11 +16,11 @@
 
 #define MX_CAN_COMM_COUNT 4 // 注意均衡负载,一条总线上不要挂载过多的外设
 
-#define CAN_COMM_MAX_BUFFSIZE 60 // 最大发送/接收字节数,如果不够可以增加此数值
+#define CAN_COMM_MAX_BUFFSIZE 65 // 完整逻辑包的有效数据上限；实际长度使用线上结构体的 sizeof()
 #define CAN_COMM_HEADER 's'      // 帧头
 #define CAN_COMM_TAIL 'e'        // 帧尾
 #define CAN_COMM_OFFSET_BYTES 4  // 's'+ datalen + 'e' + crc8
-#define CAN_COMM_OFFLINE_TX_PERIOD_MS 100U // 断线时仅保留低频探测，避免持续占满发送队列
+#define CAN_COMM_OFFLINE_TX_PERIOD_MS 20U // 离线探测间隔须短于应用通信超时，避免两端在线状态反复切换
 #define CAN_COMM_RX_FRAGMENT_TIMEOUT_MS 20U // 分片间隔过长时丢弃半包
 #define CAN_COMM_TX_BUDGET_MS 1.0f          // 整个逻辑包共用发送资源等待预算
 

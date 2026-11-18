@@ -27,7 +27,9 @@ typedef struct
 
 `offline_callback`是模块离线的回调函数，即当包含daemon的模块发生离线情况时，该函数会被调用以应对离线情况，如重启模块，重新初始化等。如果没有则传入`NULL`即可。
 
-daemon还提供application状态汇总接口：application继续判断自身的复合反馈有效性和业务故障，通过`DaemonSetFeedbackValid()`、`DaemonSetFaultFlags()`或增量的`DaemonAddFaultFlags()`/`DaemonClearFaultFlags()`写入所属daemon，再由`DaemonIsFeedbackValid()`和`DaemonGetFaultFlags()`读取并填入反馈结构。daemon不解释故障位含义；故障位定义和跨应用反馈结构保留在`robot_def.h`，业务状态机仍由对应application负责。
+daemon还提供application状态汇总接口：`daemon.h` 统一定义四类故障位和四字节 `App_Fault_s`，`daemon.c` 实现 `AppFaultUpdate(instance, &fault)`。application采集本周期故障后调用该函数，将电机、通信、IMU、控制输入依次存入从低到高的四个字节，覆盖所属daemon的故障快照，并返回快照值，0表示无故障。电机、IMU或所依赖的应用反馈链路故障会使复合设备反馈无效；命令链路和控制输入故障仍进入快照，但不改变设备反馈有效性。函数不采集设备状态、不喂狗、不执行停机，具体检测和业务状态机仍由所属application负责。
+
+`DaemonSetFeedbackValid()`、`DaemonSetFaultFlags()`及增量的`DaemonAddFaultFlags()`/`DaemonClearFaultFlags()`保留为基础接口；可通过`DaemonIsFeedbackValid()`和`DaemonGetFaultFlags()`读取状态。`robot_def.h` 引用 `daemon.h` 中的公共故障类型组成各应用反馈，daemon无需包含应用层头文件。
 
 `owner_id`即模块取自身地址并通过强制类型转换化为`void*`类型，用于拥有多个实例的模块在`offline_callback`中区分自身。如多个电机都使用一个相同的`offline_callback`，那么在调用回调函数的时候就可以通过该指针来访问某个特定的电机。
 

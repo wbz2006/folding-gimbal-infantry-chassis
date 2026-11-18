@@ -15,6 +15,7 @@
 #include "ins_task.h"
 #include "master_process.h"
 #include "stdint.h"
+#include "daemon.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
@@ -48,7 +49,8 @@
 #define CENTER_GIMBAL_OFFSET_X 0    // 云台旋转中心距底盘几何中心的距离,前后方向,云台位于正中心时默认设为0
 #define CENTER_GIMBAL_OFFSET_Y 0    // 云台旋转中心距底盘几何中心的距离,左右方向,云台位于正中心时默认设为0
 #define RADIUS_WHEEL 60             // 轮子半径
-#define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
+#define REDUCTION_RATIO_WHEEL 19.0f // 保留当前全向轮减速比
+#define CHASSIS_MAX_WHEEL_SPEED (6000.0f / 60.0f * (2.0f * 3.14159265358979323846f * RADIUS_WHEEL) / REDUCTION_RATIO_WHEEL) // 6000 rpm 换算为轮面 mm/s
 
 #define GYRO2GIMBAL_DIR_YAW 1   // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH 1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
@@ -176,9 +178,9 @@ typedef struct
 typedef struct
 {
     // 控制部分
-    float vx;           // 前进方向速度
-    float vy;           // 横移方向速度
-    float wz;           // 旋转速度
+    float vx;           // 云台系前进速度，mm/s
+    float vy;           // 云台系向右速度，mm/s
+    float wz;           // 逆时针角速度，degree/s；由底盘模式生成
     float offset_angle; // 底盘和归中位置的夹角
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
@@ -219,29 +221,24 @@ typedef struct
 typedef struct
 {
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
-    // attitude_t chassis_imu_data;
+    attitude_t chassis_imu_data;
 #endif
-    // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
-
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
-    uint8_t fault_flags;         // 底盘应用故障；双板时随反馈一起回传 CMD
-
+    App_Fault_s fault;           // 本应用通信、电机、IMU、控制输入的分类故障状态
+    float real_vx;              // 底盘几何中心前进速度，mm/s
+    float real_vy;              // 底盘几何中心向右速度，mm/s
+    float real_wz;              // 底盘逆时针角速度，degree/s
 } Chassis_Upload_Data_s;
 
 
 typedef enum
 {
-    APP_FAULT_NONE = 0,
-    APP_FAULT_COMMAND_STALE = 1U << 0,
-    APP_FAULT_FEEDBACK_STALE = 1U << 1,
-    APP_FAULT_ACTION_TIMEOUT = 1U << 2,
-    APP_FAULT_INVALID_COMMAND = 1U << 3,
-} App_Fault_Flag_e;
+    GIMBAL_ACTION_FAULT_NONE = 0,
+    GIMBAL_ACTION_FAULT_TIMEOUT = 1U << 0,
+    GIMBAL_ACTION_FAULT_FEEDBACK_LOST = 1U << 1,
+} Gimbal_Action_Fault_e;
 
 typedef struct
 {
@@ -250,12 +247,13 @@ typedef struct
 
     gimbal_fold_state_e fold_state;
     uint8_t feedback_valid; // 三电机与 IMU 均有有效且新鲜的反馈
-    uint8_t fault_flags;    // 云台应用故障；CMD 汇总后执行停机仲裁
+    App_Fault_s fault;
+    uint8_t action_fault_flags; // 机构动作故障锁存，收到有效零力矩命令后确认清除
 } Gimbal_Upload_Data_s;
 
 typedef struct
 {
-    uint8_t fault_flags; // 发射应用故障；CMD 汇总后执行停机仲裁
+    App_Fault_s fault;
     // code to go here
     // ...
 } Shoot_Upload_Data_s;

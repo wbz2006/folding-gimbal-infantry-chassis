@@ -2,17 +2,21 @@
 
 <p align='right'>neozng1@hnu.edu.cn</p>
 
-> TODO:
->
-> 1. 对`CANCommGet()`进行修改，使得其可以返回数据是否更新的相关信息。
+当前应用使用 `CANCommReceive()` 复制完整包；旧 `CANCommGet()` 仅保留兼容。
+
+## 当前双板配置
+
+底盘 CAN3 发 `0x311`、收 `0x312`；云台 CAN1 发 `0x312`、收 `0x311`。两端反馈已同步为完整 IMU、分类故障和实测底盘速度。缓存上限 65 字节，实际使用 `sizeof()`：当前 ARM GCC 短枚举下命令 21 字节、反馈 59 字节，已与参考工程逐字段核对。协议开销为 4 字节，反馈分为 8 帧，最后一帧 7 字节。字段偏移和接线见 [全向轮底盘移植说明](../../application/chassis/chassis.md)。两板需配套重新编译烧录。
+
+`CANCommReceive()` 原子检查在线并复制最近的完整有效包；返回 0 时应用当周期停机。分片超时、CRC、Bus-Off 代次失效和低频离线探测继续使用已有实现。底盘复用通信 daemon，不再额外叠加命令超时。
 
 ## 重要提醒
 
-如果传输过程中出现多次丢包或长度校验不通过，尤其是传输长度较大的时候，请开启CAN的Auto Retransmission，并尝试修改CANComm实例的发送和接受ID（以提高在总线仲裁中的优先级）。
+本工程保持 CubeMX 的 AutoRetransmission=DISABLE。出现丢包时先检查两侧结构长度、位时序、总线负载及接线，并查看 CANBusStatus 和通信收发计数；不要覆盖已有 FDCAN 恢复实现。
 
 ## 总览和封装说明
 
-CAN comm是用于CAN多机通信的模块。你不需要关心实现的协议，**只需要传入你想发送/接收的结构体的长度**（通过`sizeof()`获取）即可。单帧发送长度目前限制为60字节，如果需要加长可以在`can_comm.h`中修改`CAN_COMM_MAX_BUFFSIZE`的定义值。注意CAN的负载以及使用此模块的发送频率，否则可能造成堵塞。
+CAN comm是用于CAN多机通信的模块。你不需要关心实现的协议，**只需要传入你想发送/接收的结构体的长度**（通过`sizeof()`获取）即可。单个逻辑包的有效数据长度上限为65字节（经典 CAN 单帧仍最多8字节），如果需要加长可以在`can_comm.h`中修改`CAN_COMM_MAX_BUFFSIZE`的定义值。注意CAN的负载以及使用此模块的发送频率，否则可能造成堵塞。
 
 ## 代码结构
 
@@ -23,6 +27,7 @@ CAN comm是用于CAN多机通信的模块。你不需要关心实现的协议，
 ```c
 CANCommInstance *CANCommInit(CANComm_Init_Config_s* comm_config);
 void CANCommSend(CANCommInstance *instance, uint8_t *data);
+uint8_t CANCommReceive(CANCommInstance *instance, void *data);
 void *CANCommGet(CANCommInstance *instance);
 uint8_t CANCommIsOnline(CANCommInstance *instance);
 ```

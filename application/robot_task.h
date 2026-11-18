@@ -35,9 +35,7 @@ void StartUITASK(void const *argument);
  */
 void OSTaskInit()
 {
-    osThreadDef(instask, StartINSTASK, osPriorityAboveNormal, 0, 1024);
-    insTaskHandle = osThreadCreate(osThread(instask), NULL); // 由于是阻塞读取传感器,为姿态解算设置较高优先级,确保以1khz的频率执行
-    // // 后续修改为读取传感器数据准备好的中断处理,
+    insTaskHandle = NULL;
 
     osThreadDef(motortask, StartMOTORTASK, osPriorityNormal, 0, 256);
     motorTaskHandle = osThreadCreate(osThread(motortask), NULL);
@@ -58,7 +56,10 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
 {
     static float ins_start;
     static float ins_dt;
-    INS_Init(); // 确保BMI088被正确初始化.
+    // 初始化和校准期间允许同优先级控制任务运行并反馈 IMU 故障。
+    osThreadSetPriority(osThreadGetId(), osPriorityNormal);
+    INS_Init();
+    osThreadSetPriority(osThreadGetId(), osPriorityAboveNormal);
     LOGINFO("[freeRTOS] INS Task Start");
     for (;;)
     {
@@ -80,12 +81,13 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
     LOGINFO("[freeRTOS] MOTOR Task Start");
     for (;;)
     {
+        // 500Hz，与底盘电机反馈频率一致。
         motor_start = DWT_GetTimeline_ms();
         MotorControlTask();
         motor_dt = DWT_GetTimeline_ms() - motor_start;
         if (motor_dt > 1)
             LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);
-        osDelay(1);
+        osDelay(2);
     }
 }
 

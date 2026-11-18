@@ -131,19 +131,20 @@ void ShootTask()
     if (message_received && command_valid)
         DaemonReload(shoot_cmd_daemon);
 
-    uint8_t fault_flags = APP_FAULT_NONE;
+    App_Fault_s *fault = &shoot_feedback_data.fault;
+    memset(fault, 0, sizeof(*fault));
     if (!DaemonIsOnline(shoot_cmd_daemon))
-        fault_flags |= APP_FAULT_COMMAND_STALE;
+        fault->comm_fault_flags |= APP_COMM_FAULT_COMMAND_OFFLINE;
     if (!command_valid)
-        fault_flags |= APP_FAULT_INVALID_COMMAND;
-    if (friction_l == NULL || friction_r == NULL || loader == NULL ||
-        friction_l->daemon == NULL || friction_r->daemon == NULL || loader->daemon == NULL ||
-        !DaemonIsOnline(friction_l->daemon) || !DaemonIsOnline(friction_r->daemon) ||
-        !DaemonIsOnline(loader->daemon))
-        fault_flags |= APP_FAULT_FEEDBACK_STALE;
-
-    shoot_feedback_data.fault_flags = fault_flags;
-    if (fault_flags != APP_FAULT_NONE)
+        fault->comm_fault_flags |= APP_COMM_FAULT_INVALID_COMMAND;
+    // 电机位 1/2/3 分别对应左摩擦轮、右摩擦轮、拨弹轮。
+    if (MotorIsOffline(friction_l->daemon, friction_l->motor_can_instance))
+        fault->motor_offline_flags |= MOTOR_1_OFFLINE;
+    if (MotorIsOffline(friction_r->daemon, friction_r->motor_can_instance))
+        fault->motor_offline_flags |= MOTOR_2_OFFLINE;
+    if (MotorIsOffline(loader->daemon, loader->motor_can_instance))
+        fault->motor_offline_flags |= MOTOR_3_OFFLINE;
+    if (AppFaultUpdate(shoot_cmd_daemon, fault) != 0)
     {
         if (friction_l != NULL) DJIMotorStop(friction_l);
         if (friction_r != NULL) DJIMotorStop(friction_r);
