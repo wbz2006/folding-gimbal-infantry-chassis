@@ -27,18 +27,18 @@
 
 // 底盘运动学类型
 //#define CHASSIS_DRIVE_MECANUM     // 麦克纳姆轮
-#define CHASSIS_DRIVE_OMNI_X        // X 型四全向轮
+//#define CHASSIS_DRIVE_OMNI_X        // X 型四全向轮
+#define CHASSIS_DRIVE_SWERVE         // 全舵
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD 2711  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
 #define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 3412      // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 0           // 部署机械限幅，缺少可靠标定，保守保留 0°，待实机标定
-#define PITCH_MIN_ANGLE 0           // 部署机械限幅；与折叠强制零位分离
-#define GIMBAL_FOLD_UPPER_PITCH_TARGET_DEG 0.0f // 上下云台控制共用的 IMU Pitch 水平目标
+#define PITCH_MAX_ANGLE 0           // 云台俯仰最大角度
+#define PITCH_MIN_ANGLE 0           // 云台俯仰最小角度
 #define APP_COMMAND_TIMEOUT_MS 50U   // 应用控制命令新鲜度上限，daemon 周期换算见 daemon.h
-#define APP_FEEDBACK_TIMEOUT_MS 50U  // 应用反馈新鲜度上限，待调度实测确认
+#define APP_FEEDBACK_TIMEOUT_MS 50U  // 预留，当前底盘电机反馈离线由 DJI daemon 的 20 ms 窗口判定，此宏未接入
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 36    // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
 #define REDUCTION_RATIO_LOADER 49.0f // 拨盘电机的减速比,英雄需要修改为3508的19.0f
@@ -95,7 +95,6 @@ typedef enum
     CHASSIS_ROTATE,            // 小陀螺模式
     CHASSIS_NO_FOLLOW,         // 不跟随，允许全向平移
     CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式，底盘叠加角度环控制
-    CHASSIS_FOLDED_ROTATE = 4, // 废弃，保留协议编号；CMD 不再发送
 } chassis_mode_e;
 
 // 云台模式设置
@@ -104,37 +103,6 @@ typedef enum
     GIMBAL_ZERO_FORCE = 0, // 电流零输入
     GIMBAL_IMU_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
 } gimbal_mode_e;
-
-// 云台折叠状态机
-typedef enum
-{
-    GIMBAL_FOLDED = 0,      // 折叠状态
-    GIMBAL_FOLDING,         // 折叠过程状态
-    GIMBAL_UNFOLDING,       // 展开过程状态
-    GIMBAL_DEPLOYED,        // 部署状态
-} gimbal_fold_state_e;
-
-// 云台折叠请求状态机
-typedef enum
-{
-    GIMBAL_REQUEST_FOLD = 0, // 请求折叠
-    GIMBAL_REQUEST_DEPLOY,   // 请求展开
-} gimbal_request_mode_e;
-
-// 云台折叠步骤状态机
-typedef enum
-{
-    FOLD_STEP_LEVEL_UPPER_PITCH,
-    FOLD_STEP_MOVE_LOWER_PITCH,
-    FOLD_STEP_FINISH,
-} fold_step_e;
-
-typedef enum
-{
-    LOWER_PITCH_FOLD,
-    LOWER_PITCH_DEPLOY,
-    UPPER_PITCH_FOLD,
-} gimbal_reach_target_type_e;
 
 // 发射模式设置
 typedef enum
@@ -197,7 +165,6 @@ typedef struct
     float chassis_rotate_wz;
 
     gimbal_mode_e gimbal_mode;
-    gimbal_request_mode_e request_mode;
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -217,7 +184,6 @@ typedef struct
  * @brief 由cmd订阅,其他应用也可以根据需要获取.
  *
  */
-
 typedef struct
 {
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
@@ -243,7 +209,7 @@ typedef enum
 typedef struct
 {
     attitude_t gimbal_imu_data;
-    float yaw_motor_single_round_angle; // 本地反馈，degree，保留达妙角度小数
+    float yaw_motor_single_round_angle; // 本地反馈，degree
 
     gimbal_fold_state_e fold_state;
     uint8_t feedback_valid; // 三电机与 IMU 均有有效且新鲜的反馈

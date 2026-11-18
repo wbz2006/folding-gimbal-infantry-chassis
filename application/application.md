@@ -18,6 +18,28 @@
 
 
 
+## 共用应用故障状态
+
+`daemon.h` 定义 `App_Fault_s` 及四类故障位，供 CMD、底盘、云台和发射共用；`robot_def.h` 包含该头文件，并在底盘、云台和发射的上传结构中使用 `App_Fault_s fault`，各自保存和更新自己的状态：
+
+```c
+typedef struct
+{
+    uint8_t motor_offline_flags; // 本应用电机 1～8 的离线位，使用 Motor_Offline_Flag_e
+    uint8_t comm_fault_flags;    // 命令/应用反馈链路故障，使用 App_Comm_Fault_Flag_e
+    uint8_t imu_fault_flags;     // IMU 离线或数据无效，使用 App_IMU_Fault_Flag_e
+    uint8_t control_fault_flags; // 遥控器/图传控制输入离线，使用 App_Control_Fault_Flag_e
+} App_Fault_s;
+```
+
+公共定义不规定电机属于什么机构。底盘在 `chassis.c` 中把电机 1～4 对应轮向、5～8 对应舵向；云台后续可把 1～2 对应 yaw、pitch，发射可把 1～3 对应左右摩擦轮和拨弹电机。未使用的位保持为 0，其他应用接收状态后按对应应用的映射解释。例如同一个 `MOTOR_1_OFFLINE` 在底盘和云台中可分别表示左前轮向和 yaw 离线，各份状态互不影响。
+
+该结构固定为 4 字节，各字段独立按位组合，不再保存重复的应用汇总故障位。通信字段描述本应用依赖的命令或其他应用反馈链路，以及收到的应用命令内容无效，不绑定 CAN、串口或消息中心；电机反馈不可用记录在电机离线位中。IMU 字段区分离线和数据无效；控制输入字段区分遥控器和图传。未使用、未接入检测的字段及位保持为 0，不能据此认定设备已确认正常。
+
+每个应用按本周期检测结果覆盖已接入的字段，使用 `MotorIsOffline(daemon, can)` 检查自己的电机并组合离线位。命令链路不可用时填写 `APP_COMM_FAULT_COMMAND_OFFLINE`，命令内容无效时填写 `APP_COMM_FAULT_INVALID_COMMAND`，恢复后清除。当前底盘和本工程的发射应用已接入电机和命令通信反馈；IMU、控制输入检测以及独立云台工程的接入仍待完成。
+
+`daemon.h` 声明共用函数 `AppFaultUpdate(daemon, &fault)`，实现在 `daemon.c` 中，底盘和本工程的发射应用复用该函数。它将四个分类字段按电机、通信、IMU、控制输入的顺序存入 daemon 的 32 位快照并返回该值，最低字节为电机位；返回 0 表示无故障。同时，电机、IMU 或依赖的应用反馈链路故障会使 daemon 的设备反馈有效状态为 0，命令链路及控制输入故障只记录到快照，不使设备反馈失效。状态采集、命令校验、超时喂狗和停机策略仍由所属应用负责。
+
 ## 封装总览
 
 Robot.c是整个机器人的抽象，其下有4个应用：robot_cmd，gimbal，chassis，shoot。此框架当前是针对步兵/英雄/哨兵设计的，其他机器人只需要根据各自的特殊机构进行修改即可。robot_cmd是整个机器人的核心应用，其负责接受遥控器/上位机发来的指令，并将指令转化为实际的运动控制目标，发送给其他三个应用。后者会根据robot_cmd发来的命令，设定电机和其他执行单元的参考值等。
